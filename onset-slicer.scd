@@ -1,3 +1,19 @@
+/*
+this demo takes an audio input and segments it by onsets in real time, storing each segment to disk.
+for each segment, a .wav file is rendered to disk alongside a .csv file describing some analysis parameters.
+these parameters should help efforts to organize segments by "brightness" and "tonality,"
+in addition to the more obvious amplitude and duration.
+
+many improvements are possible! a few that come to mind:
+- strip silence from the end of each segment (including from the paramete averaging window)
+- add running maxima for parameters
+- factor into a class for easier inclusion on norns, add configuration methods etc
+
+*/
+
+
+
+
 
 Routine {
 
@@ -16,7 +32,7 @@ Routine {
 		var recordBuf= \buf.kr;
 		var writePos = Phasor.ar(end:BufFrames.kr(recordBuf));
 		var delayBuf = LocalBuf(0x10000); // >1sec, 2^n
-		var delayed = BufDelayC.ar(delayBuf, input, \lookahead.kr(0.025));
+		var delayed = BufDelayC.ar(delayBuf, input, \lookahead.kr(0.014));
 		var bufWrite = BufWr.ar(delayed, recordBuf, writePos);
 
 		/// additional analysis parameters
@@ -28,10 +44,13 @@ Routine {
 		var leak = if(onsets, 0, 1);
 		var amp = Amplitude.kr(input);
 		var ampSum = Integrator.kr(amp, leak);
+
+		// FIXME: hm, might be better to convert frequencies to exponential scale before averaging
 		var pcile = SpecPcile.kr(chain, \fraction.kr(0.95));
 		var pcileSum = Integrator.kr(pcile, leak);
 		var centroid = SpecCentroid.kr(chain);
 		var centroidSum = Integrator.kr(centroid, leak);
+
 		var gatedFlatness = SpecFlatness.kr(chain) * amp > \flatnessGateThresh.kr(0.05);
 		var gatedFlatnessSum = Integrator.kr(gatedFlatness, leak);
 
@@ -78,6 +97,7 @@ Routine {
 
 	~handle_onset_trigger = {
 		arg time, id, value;
+		[time, id, value].postln;
 		~data_frame[id] = value;
 		// bad hack: assuming magic number of ids, assuming last id arrives last
 		if (id == 5, {
@@ -111,7 +131,7 @@ Routine {
 			// save the previous data so next onset doesn't stomp it
 			var data0 = ~last_data;
 			Routine {
-				var tmp, dur, pos, pos0, durFrames, outputPath;
+				var tmp, dur, pos, pos0, durFrames, outputPath, dataFile;
 				dur = data[\duration];
 				durFrames = dur * s.sampleRate;
 				if (dur > ~capture_buf.duration, {
@@ -140,11 +160,16 @@ Routine {
 					s.sync;
 					tmp.free;
 
-					/// TODO/FIXME: write data file
-					/// it would really be nicer to have a single data output with column headers,
-					/// and append each file's data to it
-					// writeCsvIGuess(outputPath[0]);
-
+					/// FIXME: could be nicer to append to a single data file
+					dataFile = File(outputPath[1], "w");
+					dataFile.write("duration, amplitude, percentile, centroid, flatness,\n");
+					dataFile.write(""
+						++ data[\duration] ++ ", "
+						++ data[\amplitude] ++ ", "
+						++ data[\percentile] ++ ", "
+						++ data[\centroid] ++ ", "
+						++ data[\flatness]);
+					dataFile.close;
 				});
 			}.play;
 		});
@@ -153,7 +178,7 @@ Routine {
 
 	~get_output_paths = { arg time, data;
 		var path = PathName(Document.current.path).pathOnly.asString;
-		path = path ++ time.floor.asString;
+		path = path ++ "onset-slicer-output/" ++ time.floor.asInteger.asString;
 		[
 			path ++ ".wav",
 			path ++ ".csv",
