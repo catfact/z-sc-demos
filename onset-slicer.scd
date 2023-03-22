@@ -132,7 +132,7 @@ Routine {
 					\centroid, ~data_frame[5],
 					\flatness, ~data_frame[6],
 				]));
-				6.do({ arg i; ~data_frame[i] = nil; });
+				7.do({ arg i; ~data_frame[i] = nil; });
 			});
 		});
 	};
