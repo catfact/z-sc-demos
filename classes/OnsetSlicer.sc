@@ -4,18 +4,36 @@ OnsetSlicer {
 	// which need only be defined once for all instances
 	classvar <def;
 
+	//---------------------------
 	//--- behavior flags
-	// set to keep sliced buffers in memory as well as on disk
+
+	// set to keep sliced buffers in memory / on disk
 	var <>shouldKeepSessionBuffers;
-	// set to keep the analysis datain memory as well as on disk
+	var <>shouldWriteSessionBuffers;
+	// set to keep the analysis data in memory / on disk
 	var <>shouldKeepSessionData;
+	var <>shouldWriteSessionData;
+
 	// set for each sliced buffer/file to be trimmed to estimated initial non-silence
 	var <>shouldTrimSilence;
 
-	// runtime elements
+	// set to format analysis output as a lua source file
+	var <>shouldWriteLuaFormat;
+	// set to format analysis output as a sclang source file
+	var <>shouldWriteScdFormat;
+	// (if neither of the above is set, output CSV)
+
+	//---------------------------
+	//--- important processing components
+
 	var <server;
 	var <synth;
 	var <responder;
+
+	//---------------------------
+	//--- other runtime state
+
+	var <isSessionRunning;
 
 	// the rolling buffer
 	var <captureBuf;
@@ -24,6 +42,7 @@ OnsetSlicer {
 	// the current and previous frame of analysis results
 	var <dataFrame;
 	var <dataFrameLast;
+	var <timeLast;
 
 	// sliced buffers from current session, a Dictionary keyed by timestamp
 	// should be empty if `shouldKeepSessionBuffers` is false
@@ -39,7 +58,10 @@ OnsetSlicer {
 	var <outputDataFile;
 	var <outputSampleFolder;
 
+
+	//---------------------------
 	//--- callback functions
+
 	// fired when a complete dataframe is received (even when not in a session)
 	// could be useful for tuning detection parameters
 	var <>dataFrameCallback;
@@ -47,19 +69,29 @@ OnsetSlicer {
 	// fired when segment is written to disk
 	var <>segmentDoneCallback;
 
-	var <isSessionRunning;
+
+	//=============================================
+	//=== methods
 
 	*new {
-		arg aServer;
-		^super.new.init(aServer);
+		arg server, inputBus, target, captureBufDur, addAction;
+		^super.new.init(server, inputBus, target, captureBufDur, addAction);
 	}
 
 	init {
 		arg aServer, aInputBus, aTarget=nil, aCaptureBufDur=nil, aAddAction=nil;
 		var target;
 
+		shouldWriteSessionBuffers = true;
 		shouldKeepSessionBuffers = false;
-		shouldTrimSilence = true;
+		shouldWriteSessionData = true;
+		shouldKeepSessionData = false;
+
+		shouldTrimSilence = false;
+
+		shouldWriteScdFormat = false;
+		shouldWriteLuaFormat = false;
+
 		isSessionRunning = false;
 
 		segmentDoneCallback = { arg data; /* no-op */ };
@@ -67,12 +99,15 @@ OnsetSlicer {
 
 		server = aServer;
 		target = if(aTarget.notNil, {aTarget}, {server});
-		captureBufFrames = server.sampleRate * if(aCaptureBufDur.isNil, {60}, {aCaptureBufDur});
-		captureBuf = Buffer.alloc(captureBufFrames);
 
-		synth = Synth.new([
+		captureBufFrames = server.sampleRate * if(aCaptureBufDur.isNil, {60}, {aCaptureBufDur});
+		captureBuf = Buffer.alloc(server, captureBufFrames);
+
+		dataFrame = Array.newClear(7);
+
+		synth = Synth.new(\OnsetSlicer_multisend, [
 			\in, aInputBus
-		], \target, addAction:if(aAddAction.isNil, {\addToTail}, {aAddAction}));
+		], target:target, addAction:if(aAddAction.isNil, {\addToTail}, {aAddAction}));
 
 		server.sync;
 
@@ -86,26 +121,52 @@ OnsetSlicer {
 		},'/tr', server.addr);
 	}
 
-	startSession {
+	startSession {  arg outputFolderPath;
+		if (shouldWriteSessionData, {
+			/// FIXME (minor): repeating this format string
+			var timeStamp = Date.getDate.format("%Y%m%d_%H%M%S");
+
+			var path = if (outputFolderPath.isNil, {
+				Platform.userHomeDir ++ "/" ++  timeStamp
+			}, {
+				outputFolderPath
+			});
+			var ext = if (shouldWriteLuaFormat, {".lua"}, {
+				if (shouldWriteScdFormat, { ".scd" }, { ".csv"})
+			});
+
+			if (PathName(path).isFolder.not, {
+				File.mkdir(path);
+			});
+
+			path = path ++ "/" ++ timeStamp ++ ext;
+			outputDataFile = File.open(path, "a");
+			this.writeOutputDataHeader;
+		});
+
 		sessionData = Dictionary.new;
 		sessionBuffers.do({ arg buf; buf.free; });
 		sessionBuffers = Dictionary.new;
 		sessionTimeStamps = Set.new;
+
+		dataFrame = Array.newClear(7);
 		dataFrameLast = nil;
+		timeLast = SystemClock.seconds;
 	}
 
 	endSession {
-		// write everything to disk
+		outputDataFile.close;
+		isSessionRunning = false;
 	}
 
 
 	//--- "private" methods
 
-	/// this will fire on the client on each trigger message from `SendTrig`
+	/// this will fire on each trigger message from `SendTrig`
 	handleOnsetTrigger {
 		arg time, id, value;
-		//[time, id, value].postln;
 		dataFrame[id] = value;
+
 		// bad hack: assuming magic number of ids, assuming last id arrives last
 		if (id == 6, {
 			if (dataFrame.indexOf(nil).notNil, {
@@ -113,7 +174,8 @@ OnsetSlicer {
 			}, {
 				// TODO: would be smart to save timestamps from each trigger,
 				// and compare them here
-				this.handleDataFrame.value(time, Dictionary.newFrom([
+				this.handleDataFrame(Dictionary.newFrom([
+					\time, time,
 					\position, dataFrame[0],
 					\duration, dataFrame[1],
 					\amplitude, dataFrame[2],
@@ -126,92 +188,95 @@ OnsetSlicer {
 			});
 		});
 
+
 	}
 
 	/// this will fire on each complete "dataframe" (onset plus analysis)
 	handleDataFrame {
-		arg time, data;
+		arg data;
 		var pos = data[\position];
 
-		dataFrameCallback.value(time, data);
-
-		// data.keys.do({ arg k; postln("" ++ k ++ " = " ++ data[k]) });
+		dataFrameCallback.value(data);
 
 		if (isSessionRunning, {
 			if(dataFrameLast.notNil, {
 				// save the previous data so next onset doesn't stomp it
-				var data0 = ~last_data;
+				var data0 = dataFrameLast;
+				postln("handling data frame: " ++ data0);
 				Routine {
-					var tmp, dur, pos, pos0, durFrames, outputPath, dataFile;
-					dur = data[\duration];
-					durFrames = dur * server.sampleRate;
+					var durFrames;
+					var pos0 = data0[\position];
+					var pos1 = data[\position];
+					var elapsedTime = data[\time] - data0[\time];
+					var wrapped = pos0 >= pos1;
+					var tmpBuf, tmpFrames;
+					var timeStamp;
 
-						// TODO: continue refactor...
+					/// determine duration of slice buffer
+					if (shouldTrimSilence, {
+						// use estimated non-silent duration only
+						durFrames = (data[\duration] * server.sampleRate).min(captureBufFrames);
+					}, {
+						// use the total length of the segment
+						if (elapsedTime >= captureBuf.duration, {
+							durFrames = captureBuf.numFrames;
+						}, {
+							durFrames = if(wrapped, {
+								captureBufFrames- (pos1 - pos0);
+							}, {
+								pos1 - pos0;
+							});
+						});
+					});
 
-					// /// FIXME: don't use the estimated duration for this...?
-					// if (dur > captureBuf.duration, {
-					// 	postln("time since last onset exceeds buffer duration; skipping output");
-					// 	}, {
+					postln("duration in frames: " ++ durFrames);
+
+					/// allocate and copy to the slice buffer
+					tmpBuf = Buffer.alloc(server, durFrames);
+					server.sync;
+					tmpFrames = durFrames.min(captureBufFrames - pos0);
+					captureBuf.copyData(tmpBuf, srcStartAt:pos0, numSamples:tmpFrames);
+					durFrames = durFrames - tmpFrames;
+					if (durFrames > 0, {
+						captureBuf.copyData(tmpBuf, dstStartAt:pos0 + tmpFrames, numSamples:(durFrames-tmpFrames));
+					});
+
+					// get a timestamp to use as segment/buffer ID
+					timeStamp = this.makeTimeStamp;
+
+					/// optionally, write the slice buffer to disk
+					if (shouldWriteSessionBuffers, {
+						var path = outputSampleFolder ++ "/" ++ timeStamp ++ ".wav";
+						tmpBuf.write(path, "wav");
+					});
+
+					/// optionally, save the slice buffer in RAM
+					if (shouldKeepSessionBuffers, {
+						sessionBuffers[timeStamp] = tmpBuf;
+					}, {
+						tmpBuf.free;
+					});
+
+					/// optionally, save analysis data in RAM
+					if (shouldKeepSessionData, {
+						sessionData[timeStamp] = data;
+					});
+
+					/// optionally, write analysis data to disk
+					if (shouldWriteSessionData, {
+
+					});
+
+					/// fire the user segment callback
+					segmentDoneCallback.value(timeStamp, data);
 
 
-							// postln("allocating buffer; frames = " ++ durFrames);
-							// tmp = Buffer.alloc(server, durFrames);
-							// server.sync;
-							//
-							// /// FIXME: could add some pre/postroll here.
-							// /// (one possible motivator is that the position reporting will have some jitter,
-							// /// due to AR/KR and analysis latency)
-							// pos = data[\position];
-							// pos0 = data0[\position];
-							//
-							// /// FIXME: now i actually think i would like the option to save each entire segment between onsets.
-							// /// (we can always save the estimated duration in the data, but don't always want to truncate by it)
-							// if (pos > pos0, {
-							// 	captureBuf.copyData(tmp, srcStartAt:pos0, numSamples:durFrames);
-							// 	}, {
-							// 		// wrapped the buffer: perform 2x copy steps
-							// 		var n = captureBuf.size - pos0;
-							// 		captureBuf.copyData(tmp, srcStartAt:pos0, numSamples:n);
-							// 		captureBuf.copyData(tmp, dstStartAt:n, numSamples:(durFrames-n));
-							// });
-							// server.sync;
-
-
-						/// FIXME
-						// outputPath = ~get_output_paths.value(time, data);
-						// tmp.write(outputPath[0], headerFormat:"wav");
-						// server.sync;
-
-						segmentDoneCallback.value(outputPath);
-
-
-						/// FIXME: would be nicer to append to a single data file
-						/*					dataFile = File(outputPath[1], "w");
-						dataFile.write("duration, amplitude, count, percentile, centroid, flatness,\n");
-						dataFile.write(""
-						++ data[\duration] ++ ", "
-						++ data[\amplitude] ++ ", "
-						++ data[\count] ++ ", "
-						++ data[\percentile] ++ ", "
-						++ data[\centroid] ++ ", "
-						++ data[\flatness]);
-						dataFile.close;*/
-//					});
 				}.play;
 			});
 		});
 		dataFrameLast = data;
 	}
 
-	makeSlicedBuffer {
-		arg start, end, dur;
-		if (shouldTrimSilence, {
-			// TODO
-		}, {
-			// TODO
-		});
-
-	}
 
 	makeTimeStamp {
 		var stamp = Date.getDate.format("%Y%m%d_%H%M%S");
@@ -224,13 +289,31 @@ OnsetSlicer {
 			});
 			stamp = newStamp;
 		});
+		sessionTimeStamps.add(stamp);
 		^stamp.asSymbol;
+	}
+
+	writeOutputDataHeader {
+		// TODO!
+	}
+
+	writeOutputDataRow { arg timeStamp, data;
+		/// TODO!
+		if (shouldWriteLuaFormat, {
+			//...
+		}, {
+			if (shouldWriteScdFormat {
+				//...
+			}, {
+				/// CSV....
+			});
+		});
 	}
 
 	/// signal analysis is completely defined in one large synthdef
 	*sendSynthDef { arg aServer;
 
-		def = SynthDef.new(\onset_analysis_multisender, {
+		def = SynthDef.new(\OnsetSlicer_multisend, {
 			var input = In.ar(\in.kr);
 
 			/// analysis

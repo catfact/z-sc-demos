@@ -181,7 +181,7 @@ Routine {
 						~capture_buf.copyData(tmp, srcStartAt:pos0, numSamples:n);
 						~capture_buf.copyData(tmp, dstStartAt:n, numSamples:(durFrames-n));
 					});
-					s.sync;
+					s.sync;get_output_paths
 
 					outputPath = ~get_output_paths.value(time, data);
 					tmp.write(outputPath[0], headerFormat:"wav");
