@@ -3,10 +3,15 @@ OnsetSlicer {
 	// the single main analysis synthdef,
 	// which need only be defined once for all instances
 	classvar <def;
+
+	// other class-scope constants
 	classvar <outputDataFields;
+	classvar <analysisTriggerFields;
+	classvar <analysisTriggerCount;
+	classvar <analysisTriggerMax;
 
 	//---------------------------
-	//--- behavior flags
+	//--- behavior flags and options
 
 	// set to keep sliced buffers in memory / on disk
 	var <>shouldKeepSessionBuffers;
@@ -24,6 +29,11 @@ OnsetSlicer {
 	// 2: .lua
 	var <>outputDataFormat;
 
+	// total disk space budget per session
+	var <>sessionMaxTotalDiskBytes;
+	// total buffer duration budget per session
+	var <>sessionMaxTotalBufferSamples;
+
 	//---------------------------
 	//--- important processing components
 
@@ -35,14 +45,18 @@ OnsetSlicer {
 	//--- other runtime state
 
 	var <isSessionRunning;
+	var <sessionTotalDiskBytes;
+	var <sessionTotalBufferSamples;
 
 	// the rolling buffer
 	var <captureBuf;
 	var <captureBufFrames;
 
-	// the current and previous frame of analysis results
-	var <dataFrame;
-	var <dataFrameLast;
+	// current frame of analysis results,
+	// as reported directly from the synth
+	var <rawDataList;
+	// most recent analysis results, converted to a dictionary and timestamped/etc
+	var <lastDataFrame;
 	var <timeLast;
 
 	// sliced buffers from current session, a Dictionary keyed by timestamp
@@ -73,16 +87,27 @@ OnsetSlicer {
 	//=== methods
 
 	*initClass {
-		outputDataFields = [
-			\id,         // timestamp slug
-			\time,       // time when onset trigger was loged
-			\duration,   // estimated initial non-silent duration, in seconds
-			\count,      // count of non-silent control frames
-			\amplitude,  // amplitude averaged over non-silent initial duration
-			\percentile, // upper-percentile break frequency, averaged over non-silent control frames
-			\centroid,   // spectral magnitude centroid frequency, averaged over non-silent control frames
-			\flatness,   // spectral flatness, averaged over non-silent control frames
+		// list of the triggers sent from the analysis synth
+		/// mostly redundant with output data fields, so that could probably be cleaned up
+		analysisTriggerFields = [
+			\position, // frame index in the capture buffer at onset time
+			\duration,      // estimated initial non-silent duration, in seconds
+			\audibleTime,   // total non-silent time in segment
+			\amplitudeAvg,  // amplitude averaged over non-silent initial duration
+			\amplitudeMax,  // maximum amplitude in segment
+			\percentileAvg, // upper-percentile break frequency, averaged over non-silent control frames
+			\centroidAvg,   // spectral magnitude centroid frequency, averaged over non-silent control frames
+			\flatnessAvg,   // spectral flatness, averaged over non-silent control frames
+			\flatnessMin,   // minimum spectral flatness in segment
 		];
+		analysisTriggerCount = analysisTriggerFields.size;
+		analysisTriggerMax = analysisTriggerCount-1;
+
+		// list of fields used in output data
+		outputDataFields = [
+			\id,         // identifier slug used in filenames (probably timstamp-derived)
+			\time,       // time when onset trigger was logged
+		] ++ analysisTriggerFields;
 	}
 
 	*new {
@@ -93,6 +118,12 @@ OnsetSlicer {
 	init {
 		arg aServer, aInputBus, aTarget=nil, aCaptureBufDur=nil, aAddAction=nil;
 		var target;
+
+		// 256MB, if i did my math right
+		sessionMaxTotalDiskBytes = 268435456;
+
+		// separate limit for buffers saved in RAM (similar size)
+		sessionMaxTotalBufferSamples = 67108864;
 
 		shouldWriteSessionBuffers = true;
 		shouldKeepSessionBuffers = false;
@@ -114,7 +145,8 @@ OnsetSlicer {
 		captureBufFrames = server.sampleRate * if(aCaptureBufDur.isNil, {60}, {aCaptureBufDur});
 		captureBuf = Buffer.alloc(server, captureBufFrames);
 
-		dataFrame = Array.newClear(7);
+		rawDataList = Array.newClear(analysisTriggerCount);
+		lastDataFrame = nil;
 
 		synth = Synth.new(\OnsetSlicer_multisend, [
 			\in, aInputBus
@@ -134,19 +166,18 @@ OnsetSlicer {
 
 	startSession {  arg outputFolderPath;
 		if (shouldWriteSessionData, {
-			/// FIXME (minor): repeating this format string
 			var timeStamp = Date.getDate.format("%Y%m%d_%H%M%S");
 
 			var path = if (outputFolderPath.isNil, {
-				Platform.userHomeDir ++ "/" ++  timeStamp
+				Platform.userHomeDir ++ "/dust/data/edward/output/" ++  timeStamp
 			}, {
 				outputFolderPath
 			});
 
 			var ext = switch(outputDataFormat,
 				{0}, {".csv"},
-				{0}, {".scd"},
-				{0}, {".lua"}
+				{1}, {".scd"},
+				{2}, {".lua"}
 			);
 
 			if (PathName(path).isFolder.not, {
@@ -169,17 +200,28 @@ OnsetSlicer {
 		sessionBuffers = Dictionary.new;
 		sessionTimeStamps = Set.new;
 
-		dataFrame = Array.newClear(7);
-		dataFrameLast = nil;
+		rawDataList = Array.newClear(analysisTriggerCount);
+		lastDataFrame = nil;
 		timeLast = SystemClock.seconds;
 
 		isSessionRunning = true;
+
+		sessionTotalDiskBytes = 0;
+		sessionTotalBufferSamples = 0;
 	}
 
+	// immediately end the session and close the analysis results file.
+	// current segment will be discarded!
 	endSession {
-		this.writeOutputDataFooter;
-		outputDataFile.close;
-		isSessionRunning = false;
+		if (isSessionRunning, {
+			var path  = outputDataFile.path;
+			this.writeOutputDataFooter;
+			outputDataFile.close;
+			postln("stopped session; output data file: " ++ path ++ "; size = " ++ File.fileSize(path)++"B");
+			isSessionRunning = false;
+		}, {
+			postln("(OnsetSlicer: session is already stopped)");
+		});
 	}
 
 
@@ -188,29 +230,21 @@ OnsetSlicer {
 	/// this will fire on each trigger message from `SendTrig`
 	handleOnsetTrigger {
 		arg time, id, value;
-		dataFrame[id] = value;
+
+		if (rawDataList[id].notNil, {
+			postln("WARNING: corrupted data frame in OnsetSlicer");
+		});
+
+		rawDataList[id] = value;
 
 		// bad hack: assuming magic number of ids, assuming last id arrives last
-		if (id == 6, {
-			if (dataFrame.indexOf(nil).notNil, {
-				postln("whoops, incomplete data frame");
-			}, {
-				// TODO: would be smart to save timestamps from each trigger,
-				// and compare them here
-				this.handleDataFrame(Dictionary.newFrom([
-					\time, time,
-					\position, dataFrame[0],
-					\duration, dataFrame[1],
-					\amplitude, dataFrame[2],
-					\count, dataFrame[3],
-					\percentile, dataFrame[4],
-					\centroid, dataFrame[5],
-					\flatness, dataFrame[6],
-				]));
-				// set all the fields to nil so we can check for completeness of next frame
-				7.do({ arg i; dataFrame[i] = nil; });
-			});
+		if (id == analysisTriggerMax, {
+			var dataFrame = OnsetSlicer.buildDataFrame(rawDataList);
+			dataFrame[\time] = time;
+			analysisTriggerCount.do({ arg i; rawDataList[i] = nil; });
+			this.handleDataFrame(dataFrame);
 		});
+
 	}
 
 	/// this will fire on each complete "dataframe" (onset plus analysis)
@@ -221,10 +255,10 @@ OnsetSlicer {
 		dataFrameCallback.value(data);
 
 		if (isSessionRunning, {
-			if(dataFrameLast.notNil, {
-				// save the previous data so next onset doesn't stomp it
-				var data0 = dataFrameLast;
-				postln("handling data frame: " ++ data0);
+			if(lastDataFrame.notNil, {
+				// save a copy of the previous data so next onset doesn't stomp it
+				var data0 = lastDataFrame.copy;
+
 				Routine {
 					var durFrames;
 					var pos0 = data0[\position];
@@ -251,8 +285,6 @@ OnsetSlicer {
 						});
 					});
 
-					postln("duration in frames: " ++ durFrames);
-
 					/// allocate and copy to the slice buffer
 					tmpBuf = Buffer.alloc(server, durFrames);
 					server.sync;
@@ -269,12 +301,18 @@ OnsetSlicer {
 					/// optionally, write the slice buffer to disk
 					if (shouldWriteSessionBuffers, {
 						var path = outputSampleFolder ++ "/" ++ timeStamp ++ ".wav";
+						var bytes;
 						tmpBuf.write(path, "wav");
+						server.sync;
+						bytes = File.fileSize(path);
+						postln("wrote audio file: " ++ path ++ "; size = "++bytes);
+						sessionTotalDiskBytes = sessionTotalDiskBytes + bytes;
 					});
 
 					/// optionally, save the slice buffer in RAM
 					if (shouldKeepSessionBuffers, {
 						sessionBuffers[timeStamp] = tmpBuf;
+						sessionTotalBufferSamples = sessionTotalBufferSamples + durFrames;
 					}, {
 						tmpBuf.free;
 					});
@@ -292,10 +330,25 @@ OnsetSlicer {
 					/// fire the user segment callback
 					server.sync;
 					segmentDoneCallback.value(timeStamp, data);
+
+
+					// stop the session if we've busted the disk/ram limits
+					if (sessionTotalBufferSamples > sessionMaxTotalBufferSamples, {
+						postln("total samples in RAM exceeds limit: "
+							++ sessionTotalBufferSamples ++ "; ending session");
+						this.endSession;
+					});
+					if(sessionTotalDiskBytes > sessionMaxTotalDiskBytes, {
+						postln("total bytes on disk exceeds limit: "
+							++ sessionTotalDiskBytes ++ "; ending session");
+						this.endSession;
+					});
+
+
 				}.play;
 			});
 		});
-		dataFrameLast = data;
+		lastDataFrame = data;
 	}
 
 	makeTimeStamp {
@@ -349,10 +402,22 @@ OnsetSlicer {
 
 	writeOutputDataRow { arg timeStamp, data;
 		outputDataFile.write(timeStamp ++ ", ");
-		outputDataFields.do({ arg key;
+		outputDataFile.write("" ++ data[\time] ++ ", ");
+		analysisTriggerFields.do({ arg key;
 			outputDataFile.write("" ++ data[key] ++ ", ");
 		});
 		outputDataFile.write("\n");
+	}
+
+	//-------------------
+	//--- class methods
+
+	*buildDataFrame { arg rawDataList;
+		var df = Dictionary.new;
+		analysisTriggerCount.do({ arg i;
+			df[analysisTriggerFields[i]] = rawDataList[i];
+		});
+		^df
 	}
 
 	/// signal analysis is completely defined in one large synthdef
@@ -361,7 +426,7 @@ OnsetSlicer {
 		def = SynthDef.new(\OnsetSlicer_multisend, {
 			var input = In.ar(\in.kr);
 
-			/// analysis
+			/// --- onset analysis
 			var chain = FFT(LocalBuf(\fftSize.ir(2048)), input, \hop.ir(0.5), \wintype.ir(0), \active.kr(1), \winsize.ir(0));
 			var onsets = Onsets.kr(chain,
 				\threshold.kr(0.5), \odftype.kr('rcomplex'),
@@ -369,7 +434,7 @@ OnsetSlicer {
 				\whtype.kr(1), \rawodf.kr(0)
 			);
 
-			/// delayed recording buffer
+			/// --- delayed recording buffer
 			var recordBuf= \buf.kr;
 			var writePos = Phasor.ar(end:BufFrames.kr(recordBuf));
 			var delayBuf = LocalBuf(0x10000); // >1sec, 2^n
@@ -377,45 +442,58 @@ OnsetSlicer {
 			var bufWrite = BufWr.ar(delayed, recordBuf, writePos);
 			var startPos = Latch.kr(A2K.kr(writePos), onsets);
 
-			/// additional analysis parameters
-			/// each is accumulated so we can report averages
+			/// --- more analysis!
 
 			// bit of a hack to make a resettable accumulator
 			var leak = if(onsets, 0, 1);
 
+			// amplitude follower
+			// fast attack and release since this is used for statistical filtering
+			// (not an envelope we would listen to or use directly)
+			// still want some smoothing for low frequency input
 			var amp = Amplitude.kr(input, \ampAttack.kr(0.005), \ampRelease.kr(0.01));
-			var gate = amp > \gateThreshold.kr(-60.dbamp);
+			var ampMax = RunningMax.kr(amp, onsets);
+
+			var isAudible = amp > \audibleThreshold.kr(-60.dbamp);
 			var ampSum = Integrator.kr(amp, leak);
-			var gateCount = Integrator.kr(gate, leak);
+			var audibleCount = Integrator.kr(isAudible, leak);
 
-			//// record duration for non-silent only
-			// use a much slower release here
-			var isQuiet = (Amplitude.kr(input, \quietAttack.kr(0.005), \quietRelease.kr(1),) > \quietThresh.kr(-60.dbamp)).if(0, 1);
-
-			var quietTrig = SetResetFF.kr(isQuiet, onsets);
-			var duration = Latch.kr(Sweep.kr(onsets, 1), quietTrig);
+			/// separate amp follower and gate for estimating initial non-silent duration after the onset
+			/// this should use a very slow release time in comparison
+			/// NB: this release time will effectively set a lower bound on the segment size
+			var isQuiet = (Amplitude.kr(input, \quietAttack.kr(0.005), \quietRelease.kr(0.1),) > \quietThreshold.kr(-60.dbamp)).if(0, 1);
+			var duration = Latch.kr(Sweep.kr(onsets, 1), SetResetFF.kr(isQuiet, onsets));
 
 			/// all following parameters are gated by amplitude before accumulator
 			var pcile = SpecPcile.kr(chain, \fraction.kr(0.9));
-			var pcileSum = Integrator.kr(if(gate, pcile.cpsmidi, 0), leak);
+			var pcileSum = Integrator.kr(if(isAudible, pcile.cpsmidi, 0), leak);
+
 			var centroid = SpecCentroid.kr(chain);
-			var centroidSum = Integrator.kr(if(gate, centroid.cpsmidi, 0), leak);
+			var centroidSum = Integrator.kr(if(isAudible, centroid.cpsmidi, 0), leak);
+
 			var flatness = SpecFlatness.kr(chain);
-			var flatnessSum = Integrator.kr(if(gate, flatness, 0), leak);
+			var flatnessSum = Integrator.kr(if(isAudible, flatness, 0), leak);
+			var flatnessMin = RunningMin.kr(flatness, onsets);
 
-			SendTrig.kr(onsets, \idPos.ir(0), startPos);
-			SendTrig.kr(onsets, \idDur.ir(1), duration);
-			SendTrig.kr(onsets, \idAmpAvg.ir(2), ampSum/duration);
-			SendTrig.kr(onsets, \idCount.ir(3), gateCount);
-			SendTrig.kr(onsets, \idPcileAvg.ir(4), pcileSum/gateCount);
-			SendTrig.kr(onsets, \idCentroidAvg.ir(5), centroidSum/gateCount);
-			SendTrig.kr(onsets, \idFlatnessAvg.ir(6), flatnessSum/gateCount);
+			/// --- send everything to sclang
 
-			/// TODO: add running maxima?
+			/// NB: i wish SendTrig could send arrays but nope.
+			/// let me know of any better way to do this!
+			/// (while ensuring that these things are all calculated on the same control block)
+
+			/// NB: in contrast to initial demo, i'm just hardcoding these IDs
+			/// (making them settable doesn't help with magic-number problems, just more verbose)
+			SendTrig.kr(onsets, 0, startPos);
+			SendTrig.kr(onsets, 1, duration);
+			SendTrig.kr(onsets, 2, audibleCount*ControlDur.ir);
+			SendTrig.kr(onsets, 3, ampSum/duration);
+			SendTrig.kr(onsets, 4, ampMax);
+			SendTrig.kr(onsets, 5, pcileSum/audibleCount);
+			SendTrig.kr(onsets, 6, centroidSum/audibleCount);
+			SendTrig.kr(onsets, 7, flatnessSum/audibleCount);
+			SendTrig.kr(onsets, 8, flatnessMin);
 
 		});
 		def.send(aServer);
-
 	}
-
 }
