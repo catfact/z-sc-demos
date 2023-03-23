@@ -2,6 +2,7 @@ s = Server.default;
 
 // change device name here, or comment out to use the system default
 s.options.inDevice_("Steinberg UR-RT2");
+//s.options.inDevice_("MacBook Air Microphone");
 
 s.waitForBoot {
 	Routine {
@@ -15,7 +16,11 @@ s.waitForBoot {
 		s.sync;
 
 		o = OnsetSlicer.new(s, inputBus:~input_bus.index, target:~input_synth, addAction:\addAfter);
-		o.dataFrameCallback_({ arg data;
+
+		o.shouldKeepSessionBuffers_(true);
+		o.shouldKeepSessionData_(true);
+
+		o.dataFrameCallback_({ arg data;i
 			// "\ndata frame callback: ".postln;
 			// data.keys.do({ arg k; [k, data[k]].postln; });
 		});
@@ -27,10 +32,18 @@ s.waitForBoot {
 		postln("starting session...");
 		o.startSession;
 
-		32.wait;
+		16.wait;
 
 		postln("ending session...");
 		o.endSession;
+
+		{
+			e = SlicerEyes.new(o.sessionData, o.sessionBuffers);
+
+			/// TODO: doesn't do anything
+			// h = SlicerHands.new(o.sessionData, o.sessionBuffers);
+		}.defer;
+
 
 	}.play;
 }

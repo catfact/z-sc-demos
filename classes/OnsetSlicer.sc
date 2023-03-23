@@ -486,7 +486,7 @@ OnsetSlicer {
 			SendTrig.kr(onsets, 0, startPos);
 			SendTrig.kr(onsets, 1, duration);
 			SendTrig.kr(onsets, 2, audibleCount*ControlDur.ir);
-			SendTrig.kr(onsets, 3, ampSum/duration);
+			SendTrig.kr(onsets, 3, ampSum/(duration*ControlRate.ir));
 			SendTrig.kr(onsets, 4, ampMax);
 			SendTrig.kr(onsets, 5, pcileSum/audibleCount);
 			SendTrig.kr(onsets, 6, centroidSum/audibleCount);
