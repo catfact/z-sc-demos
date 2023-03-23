@@ -214,10 +214,10 @@ OnsetSlicer {
 	// current segment will be discarded!
 	endSession {
 		if (isSessionRunning, {
-			var path  = outputDataFile.path;
+//			var path  = outputDataFile.path;
 			this.writeOutputDataFooter;
 			outputDataFile.close;
-			postln("stopped session; output data file: " ++ path ++ "; size = " ++ File.fileSize(path)++"B");
+			postln("stopped session"); //; output data file: " ++ path ++ "; size = " ++ File.fileSize(path)++"B");
 			isSessionRunning = false;
 		}, {
 			postln("(OnsetSlicer: session is already stopped)");
