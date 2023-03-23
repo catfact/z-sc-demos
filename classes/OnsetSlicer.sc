@@ -103,6 +103,7 @@ OnsetSlicer {
 		shouldTrimSilence = false;
 
 		outputDataFormat = 0;
+		outputSampleFolder =
 
 		isSessionRunning = false;
 
@@ -167,6 +168,8 @@ OnsetSlicer {
 		dataFrame = Array.newClear(7);
 		dataFrameLast = nil;
 		timeLast = SystemClock.seconds;
+
+		isSessionRunning = true;
 	}
 
 	endSession {
@@ -202,8 +205,6 @@ OnsetSlicer {
 				7.do({ arg i; dataFrame[i] = nil; });
 			});
 		});
-
-
 	}
 
 	/// this will fire on each complete "dataframe" (onset plus analysis)
@@ -293,10 +294,10 @@ OnsetSlicer {
 
 	makeTimeStamp {
 		var stamp = Date.getDate.format("%Y%m%d_%H%M%S");
-		if(sessionTimeStamps.contains(stamp), {
+		if(sessionTimeStamps.includes(stamp), {
 			var offset = 1;
 			var newStamp = stamp ++ "_" ++ offset;
-			while (sessionTimeStamps.contains(newStamp), {
+			while (sessionTimeStamps.includes(newStamp), {
 				offset = offset + 1;
 				newStamp = stamp ++ "_" ++ offset;
 			});
@@ -347,7 +348,7 @@ OnsetSlicer {
 	writeOutputDataRow { arg timeStamp, data;
 		outputDataFile.write(timeStamp ++ ", ");
 		outputDataFields.do({ arg key;
-			outputDataFile.write(data[key] ++ ", ");
+			outputDataFile.write("" ++ data[key] ++ ", ");
 		});
 		outputDataFile.write("\n");
 	}
@@ -400,13 +401,13 @@ OnsetSlicer {
 			var flatness = SpecFlatness.kr(chain);
 			var flatnessSum = Integrator.kr(if(gate, flatness, 0), leak);
 
-			SendTrig.kr(quietTrig, \idPos.ir(0), startPos);
-			SendTrig.kr(quietTrig, \idDur.ir(1), duration);
-			SendTrig.kr(quietTrig, \idAmpAvg.ir(2), ampSum/duration);
-			SendTrig.kr(quietTrig, \idCount.ir(3), gateCount);
-			SendTrig.kr(quietTrig, \idPcileAvg.ir(4), pcileSum/gateCount);
-			SendTrig.kr(quietTrig, \idCentroidAvg.ir(5), centroidSum/gateCount);
-			SendTrig.kr(quietTrig, \idFlatnessAvg.ir(6), flatnessSum/gateCount);
+			SendTrig.kr(onsets, \idPos.ir(0), startPos);
+			SendTrig.kr(onsets, \idDur.ir(1), duration);
+			SendTrig.kr(onsets, \idAmpAvg.ir(2), ampSum/duration);
+			SendTrig.kr(onsets, \idCount.ir(3), gateCount);
+			SendTrig.kr(onsets, \idPcileAvg.ir(4), pcileSum/gateCount);
+			SendTrig.kr(onsets, \idCentroidAvg.ir(5), centroidSum/gateCount);
+			SendTrig.kr(onsets, \idFlatnessAvg.ir(6), flatnessSum/gateCount);
 
 			/// TODO: add running maxima?
 
