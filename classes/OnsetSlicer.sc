@@ -69,7 +69,6 @@ OnsetSlicer {
 	// fired when segment is written to disk
 	var <>segmentDoneCallback;
 
-
 	//=============================================
 	//=== methods
 
@@ -103,7 +102,6 @@ OnsetSlicer {
 		shouldTrimSilence = false;
 
 		outputDataFormat = 0;
-		outputSampleFolder =
 
 		isSessionRunning = false;
 
@@ -155,6 +153,12 @@ OnsetSlicer {
 				File.mkdir(path);
 			});
 
+			outputSampleFolder = path ++ "/sliced";
+			postln("outputSampleFolder: " ++ outputSampleFolder);
+			if (PathName(outputSampleFolder).isFolder.not, {
+				File.mkdir(outputSampleFolder);
+			});
+
 			path = path ++ "/" ++ timeStamp ++ ext;
 			outputDataFile = File.open(path, "a");
 			this.writeOutputDataHeader;
@@ -173,6 +177,7 @@ OnsetSlicer {
 	}
 
 	endSession {
+		this.writeOutputDataFooter;
 		outputDataFile.close;
 		isSessionRunning = false;
 	}
@@ -202,6 +207,7 @@ OnsetSlicer {
 					\centroid, dataFrame[5],
 					\flatness, dataFrame[6],
 				]));
+				// set all the fields to nil so we can check for completeness of next frame
 				7.do({ arg i; dataFrame[i] = nil; });
 			});
 		});
@@ -297,7 +303,7 @@ OnsetSlicer {
 		if(sessionTimeStamps.includes(stamp), {
 			var offset = 1;
 			var newStamp = stamp ++ "_" ++ offset;
-			while (sessionTimeStamps.includes(newStamp), {
+			while ({sessionTimeStamps.includes(newStamp)}, {
 				offset = offset + 1;
 				newStamp = stamp ++ "_" ++ offset;
 			});
@@ -314,7 +320,6 @@ OnsetSlicer {
 			},
 			{1}, { // scd
 				outputDataFile.write("[ // ");
-
 			},
 			{2}, { // lua
 				outputDataFile.write("{ -- ");
@@ -341,9 +346,6 @@ OnsetSlicer {
 		);
 		outputDataFile.write("\n");
 	}
-
-
-
 
 	writeOutputDataRow { arg timeStamp, data;
 		outputDataFile.write(timeStamp ++ ", ");
