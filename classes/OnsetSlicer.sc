@@ -3,6 +3,7 @@ OnsetSlicer {
 	// the single main analysis synthdef,
 	// which need only be defined once for all instances
 	classvar <def;
+	classvar <outputDataFields;
 
 	//---------------------------
 	//--- behavior flags
@@ -17,11 +18,11 @@ OnsetSlicer {
 	// set for each sliced buffer/file to be trimmed to estimated initial non-silence
 	var <>shouldTrimSilence;
 
-	// set to format analysis output as a lua source file
-	var <>shouldWriteLuaFormat;
-	// set to format analysis output as a sclang source file
-	var <>shouldWriteScdFormat;
-	// (if neither of the above is set, output CSV)
+	// numerical index for output data format
+	// 0: .csv (default)
+	// 1: .scd
+	// 2: .lua
+	var <>outputDataFormat;
 
 	//---------------------------
 	//--- important processing components
@@ -58,7 +59,6 @@ OnsetSlicer {
 	var <outputDataFile;
 	var <outputSampleFolder;
 
-
 	//---------------------------
 	//--- callback functions
 
@@ -72,6 +72,19 @@ OnsetSlicer {
 
 	//=============================================
 	//=== methods
+
+	*initClass {
+		outputDataFields = [
+			\id,         // timestamp slug
+			\time,       // time when onset trigger was loged
+			\duration,   // estimated initial non-silent duration, in seconds
+			\count,      // count of non-silent control frames
+			\amplitude,  // amplitude averaged over non-silent initial duration
+			\percentile, // upper-percentile break frequency, averaged over non-silent control frames
+			\centroid,   // spectral magnitude centroid frequency, averaged over non-silent control frames
+			\flatness,   // spectral flatness, averaged over non-silent control frames
+		];
+	}
 
 	*new {
 		arg server, inputBus, target, captureBufDur, addAction;
@@ -89,8 +102,7 @@ OnsetSlicer {
 
 		shouldTrimSilence = false;
 
-		shouldWriteScdFormat = false;
-		shouldWriteLuaFormat = false;
+		outputDataFormat = 0;
 
 		isSessionRunning = false;
 
@@ -131,9 +143,12 @@ OnsetSlicer {
 			}, {
 				outputFolderPath
 			});
-			var ext = if (shouldWriteLuaFormat, {".lua"}, {
-				if (shouldWriteScdFormat, { ".scd" }, { ".csv"})
-			});
+
+			var ext = switch(outputDataFormat,
+				{0}, {".csv"},
+				{0}, {".scd"},
+				{0}, {".lua"}
+			);
 
 			if (PathName(path).isFolder.not, {
 				File.mkdir(path);
@@ -264,19 +279,17 @@ OnsetSlicer {
 
 					/// optionally, write analysis data to disk
 					if (shouldWriteSessionData, {
-
+						this.writeOutputDataRow(timeStamp, data);
 					});
 
 					/// fire the user segment callback
+					server.sync;
 					segmentDoneCallback.value(timeStamp, data);
-
-
 				}.play;
 			});
 		});
 		dataFrameLast = data;
 	}
-
 
 	makeTimeStamp {
 		var stamp = Date.getDate.format("%Y%m%d_%H%M%S");
@@ -294,20 +307,49 @@ OnsetSlicer {
 	}
 
 	writeOutputDataHeader {
-		// TODO!
+		switch(outputDataFormat,
+			{0}, { // csv
+				// nothing to do
+			},
+			{1}, { // scd
+				outputDataFile.write("[ // ");
+
+			},
+			{2}, { // lua
+				outputDataFile.write("{ -- ");
+			}
+		);
+
+		outputDataFields.do({ arg key;
+			outputDataFile.write(key ++ ", ");
+		});
+		outputDataFile.write("\n");
 	}
 
+	writeOutputDataFooter {
+		switch(outputDataFormat,
+			{0}, { // csv
+				// nothing to do
+			},
+			{1}, { // scd
+				outputDataFile.write("]");
+			},
+			{2}, { // lua
+				outputDataFile.write("}");
+			}
+		);
+		outputDataFile.write("\n");
+	}
+
+
+
+
 	writeOutputDataRow { arg timeStamp, data;
-		/// TODO!
-		if (shouldWriteLuaFormat, {
-			//...
-		}, {
-			if (shouldWriteScdFormat {
-				//...
-			}, {
-				/// CSV....
-			});
+		outputDataFile.write(timeStamp ++ ", ");
+		outputDataFields.do({ arg key;
+			outputDataFile.write(data[key] ++ ", ");
 		});
+		outputDataFile.write("\n");
 	}
 
 	/// signal analysis is completely defined in one large synthdef
