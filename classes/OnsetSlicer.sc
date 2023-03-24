@@ -79,9 +79,10 @@ OnsetSlicer {
 	// fired when a complete dataframe is received (even when not in a session)
 	// could be useful for tuning detection parameters
 	var <>dataFrameCallback;
-
 	// fired when segment is written to disk
 	var <>segmentDoneCallback;
+	// fired when session completes
+	var <>sessionDoneCallback;
 
 	//=============================================
 	//=== methods
@@ -138,6 +139,7 @@ OnsetSlicer {
 
 		segmentDoneCallback = { arg data; /* no-op */ };
 		dataFrameCallback = { arg data; /* no-op */ };
+		sessionDoneCallback = { arg data, buffers; /* no-op */ };
 
 		server = aServer;
 		target = if(aTarget.notNil, {aTarget}, {server});
@@ -222,6 +224,7 @@ OnsetSlicer {
 		}, {
 			postln("(OnsetSlicer: session is already stopped)");
 		});
+		sessionDoneCallback.value(sessionData, sessionBuffers);
 	}
 
 
