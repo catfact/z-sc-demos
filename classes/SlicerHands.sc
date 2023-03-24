@@ -76,7 +76,7 @@ SlicerEyes {
 
 /// basic sampler consuming OnsetSlicer session data
 SlicerHands {
-	classvar <defaultMapFunction;
+	classvar <>defaultMapFunction;
 
 	var <>mapFunction, <>bufGains;
 	var <data, <buffers, <map;
@@ -213,7 +213,7 @@ SlicerHands {
 				var dur = data[id][\duration];
 				postln("playing; [layer, id, buf, gain, dur] = " ++ [layerIdx, id, buf, gain, dur]);
 
-				if (shouldSoloNoteGroups, {
+				// if (shouldSoloNoteGroups, {
 					groupNode.set(\gate, 0);
 				});
 
