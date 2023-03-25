@@ -213,7 +213,7 @@ SlicerHands {
 				var dur = data[id][\duration];
 				postln("playing; [layer, id, buf, gain, dur] = " ++ [layerIdx, id, buf, gain, dur]);
 
-				// if (shouldSoloNoteGroups, {
+				if (shouldSoloNoteGroups, {
 					groupNode.set(\gate, 0);
 				});
 
