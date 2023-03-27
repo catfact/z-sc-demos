@@ -88,6 +88,11 @@ SlicerHands {
 	// behavior flag: if set, each note stops other synths triggered by same note
 	var <>shouldSoloNoteGroups;
 
+	// minimum velocity value;
+	var <>minVelocity;
+	// set to ignore incoming notes below the velocity threshold
+	var <>shouldIgnoreLowVelocity;
+
 	*initClass {
 		// mapping function should take a dataset and an optional list of notes
 		// produces a dictionary where:
@@ -162,6 +167,8 @@ SlicerHands {
 		var normAmpTarget = -12.dbamp;
 
 		shouldSoloNoteGroups = true;
+		shouldIgnoreLowVelocity = true;
+		minVelocity = 1;
 
 		data = aOnsetData;
 		buffers = aSliceBuffers;
@@ -206,20 +213,24 @@ SlicerHands {
 			if (layerList.isNil, {
 				postln("no layer list found for note number " ++ num);
 			}, {
-				var layerIdx = vel.linlin(0, 127, 0, layerList.size-1).asInteger;
-				var id = layerList[layerIdx];
-				var buf = buffers[id];
-				var gain = bufGains[id];
-				var dur = data[id][\duration];
-				postln("playing; [layer, id, buf, gain, dur] = " ++ [layerIdx, id, buf, gain, dur]);
+				if (vel >= minVelocity || shouldIgnoreLowVelocity.not, {
+					var layerIdx, id, buf, gain, dur;
+					layerIdx = vel.linlin(minVelocity, 127, 0, layerList.size-1).asInteger;
+					id = layerList[layerIdx];
+					buf = buffers[id];
+					gain = bufGains[id];
+					dur = data[id][\duration];
+					postln("playing; [layer, id, buf, gain, dur] = " ++ [layerIdx, id, buf, gain, dur]);
 
-				if (shouldSoloNoteGroups, {
-					groupNode.set(\gate, 0);
+					if (shouldSoloNoteGroups, {
+						groupNode.set(\gate, 0);
+					});
+
+					Synth.new(\SlicerHands_OneShotPlayer, [
+						\out, outBus, \buf, buf.bufnum, \amp, gain, \dur, dur
+					], groupNode);
+
 				});
-
-				Synth.new(\SlicerHands_OneShotPlayer, [
-					\out, outBus, \buf, buf.bufnum, \amp, gain, \dur, dur
-				], groupNode);
 			});
 		});
 	}
