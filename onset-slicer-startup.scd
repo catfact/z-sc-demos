@@ -1,8 +1,8 @@
 s = Server.default;
 
 // change device names here, or comment out to use the system defaults
-s.options.inDevice_("Steinberg UR-RT2");
-s.options.outDevice_("Steinberg UR-RT2");
+//s.options.inDevice_("Steinberg UR-RT2");
+//s.options.outDevice_("Steinberg UR-RT2");
 
 s.waitForBoot {
 	Routine {
@@ -25,10 +25,10 @@ s.waitForBoot {
 		// stop after 10 seconds of total buffers are captured
 		o.sessionMaxTotalBufferSamples_(s.sampleRate * 10);
 
-		o.dataFrameCallback_({ arg data;i
-			// "\ndata frame callback: ".postln;
-			// data.keys.do({ arg k; [k, data[k]].postln; });
+		o.dataFrameCallback_({ arg data;
+			{ ~running_viz_win.refresh; }.defer;
 		});
+
 		o.segmentDoneCallback_({ arg timeStamp, data;
 			// ["segment done callback: ", timeStamp, data].postln;
 		});
@@ -72,3 +72,37 @@ s.waitForBoot {
 		});
 	}.play;
 };
+
+
+// running visualizer
+~running_viz_win = Window("slice data", 512@512);
+~running_viz_win.view.background_(Color.black);
+~running_viz_win.drawFunc = {
+	if (o.notNil, {
+		var data = o.sessionData;
+		data.do({ arg frame;
+			var b, pos, color, size,
+			durNorm, ampNorm, centNorm, flatNorm;
+
+			b = ~running_viz_win.bounds;
+
+			/// highly arbitrary ranges here
+			durNorm = frame[\duration].linlin(0, 4, 0, 1);
+			ampNorm = frame[\amplitudeMax].ampdb.linlin(-30, 0, 0, 1);
+			centNorm = frame[\centroidAvg].cpsmidi.linlin(30, 90, 0, 1);
+			/// inverting flatness here
+			flatNorm = frame[\flatnessMin].linlin(0, 0.7, 1, 0);
+
+			[ frame[\flatnessMin], flatNorm].postln;
+
+			pos = Point(centNorm * b.width, flatNorm * b.height);
+			color = Color.grey(ampNorm.linlin(0, 1, 0.2, 1.0));
+			size = durNorm.linlin(0, 1, 4, 20);
+
+			Pen.fillColor = color;
+			Pen.addWedge(pos, size, 0, 2*pi);
+			Pen.fill;
+		});
+	});
+};
+~running_viz_win.front;

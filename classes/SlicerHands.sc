@@ -88,9 +88,11 @@ SlicerHands {
 	// behavior flag: if set, each note stops other synths triggered by same note
 	var <>shouldSoloNoteGroups;
 
-	// minimum velocity value;
-	var <>minVelocity;
-	// set to ignore incoming notes below the velocity threshold
+	// minimum and maximum velocity values;
+	// changing this will affect the velocity layer mapping
+	var <>minVelocity, <>maxVelocity;
+	// set to ignore incoming notes below the minoimum velocity
+	// if unset, all velocities below minimum will be mapped to the lowest layer
 	var <>shouldIgnoreLowVelocity;
 
 	*initClass {
@@ -169,6 +171,7 @@ SlicerHands {
 		shouldSoloNoteGroups = true;
 		shouldIgnoreLowVelocity = true;
 		minVelocity = 1;
+		maxVelocity = 127;
 
 		data = aOnsetData;
 		buffers = aSliceBuffers;
@@ -215,7 +218,7 @@ SlicerHands {
 			}, {
 				if (vel >= minVelocity || shouldIgnoreLowVelocity.not, {
 					var layerIdx, id, buf, gain, dur;
-					layerIdx = vel.linlin(minVelocity, 127, 0, layerList.size-1).asInteger;
+					layerIdx = vel.linlin(minVelocity, maxVelocity, 0, layerList.size-1).asInteger;
 					id = layerList[layerIdx];
 					buf = buffers[id];
 					gain = bufGains[id];
